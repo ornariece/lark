@@ -97,6 +97,15 @@ class LarkOptions(Serialize):
     if __doc__:
         __doc__ += OPTIONS_DOC
 
+
+    # Adding a new option needs to be done in multiple places:
+    # - In the dictionary below. This is the primary truth of which options `Lark.__init__` accepts
+    # - In the docstring above. It is used both for the docstring of `LarkOptions` and `Lark`, and in readthedocs
+    # - In `lark-stubs/lark.pyi`:
+    #   - As attribute to `LarkOptions`
+    #   - As parameter to `Lark.__init__`
+    # - Potentially in `_LOAD_ALLOWED_OPTIONS` below this class, when the option doesn't change how the grammar is loaded
+    # - Potentially in `lark.tools.__init__`, if it makes sense, and it can easily be passed as a cmd argument
     _defaults = {
         'debug': False,
         'keep_all_tokens': False,
@@ -162,6 +171,14 @@ class LarkOptions(Serialize):
     @classmethod
     def deserialize(cls, data, memo):
         return cls(data)
+
+
+# Options that can be passed to the Lark parser, even when it was loaded from cache/standalone.
+# These option are only used outside of `load_grammar`.
+_LOAD_ALLOWED_OPTIONS = {'postlex', 'transformer', 'use_bytes', 'debug', 'g_regex_flags', 'regex', 'propagate_positions', 'tree_class'}
+
+_VALID_PRIORITY_OPTIONS = ('auto', 'normal', 'invert', None)
+_VALID_AMBIGUITY_OPTIONS = ('auto', 'resolve', 'explicit', 'forest')
 
 
 class Lark(Serialize):
@@ -231,8 +248,11 @@ class Lark(Serialize):
 
             if FS.exists(cache_fn):
                 logger.debug('Loading grammar from cache: %s', cache_fn)
+                # Remove options that aren't relevant for loading from cache
+                for name in (set(options) - _LOAD_ALLOWED_OPTIONS):
+                    del options[name]
                 with FS.open(cache_fn, 'rb') as f:
-                    self._load(f, self.options.transformer, self.options.postlex)
+                    self._load(f, **options)
                 return
 
         if self.options.lexer == 'auto':
@@ -256,22 +276,24 @@ class Lark(Serialize):
                 'Only %s supports disambiguation right now') % ', '.join(disambig_parsers)
 
         if self.options.priority == 'auto':
-            if self.options.parser in ('earley', 'cyk', ):
-                self.options.priority = 'normal'
-            elif self.options.parser in ('lalr', ):
-                self.options.priority = None
-        elif self.options.priority in ('invert', 'normal'):
-            assert self.options.parser in ('earley', 'cyk'), "priorities are not supported for LALR at this time"
+            self.options.priority = 'normal'
 
-        assert self.options.priority in ('auto', None, 'normal', 'invert'), 'invalid priority option specified: {}. options are auto, none, normal, invert.'.format(self.options.priority)
+        if self.options.priority not in _VALID_PRIORITY_OPTIONS:
+            raise ValueError("invalid priority option: %r. Must be one of %r" % (self.options.priority, _VALID_PRIORITY_OPTIONS))
         assert self.options.ambiguity not in ('resolve__antiscore_sum', ), 'resolve__antiscore_sum has been replaced with the option priority="invert"'
-        assert self.options.ambiguity in ('resolve', 'explicit', 'forest', 'auto', )
+        if self.options.ambiguity not in _VALID_AMBIGUITY_OPTIONS:
+            raise ValueError("invalid ambiguity option: %r. Must be one of %r" % (self.options.ambiguity, _VALID_AMBIGUITY_OPTIONS))
 
         # Parse the grammar file and compose the grammars (TODO)
-        self.grammar = load_grammar(grammar, self.source, re_module)
+        self.grammar = load_grammar(grammar, self.source, re_module, self.options.keep_all_tokens)
+
+        if self.options.postlex is not None:
+            terminals_to_keep = set(self.options.postlex.always_accept)
+        else:
+            terminals_to_keep = set()
 
         # Compile the EBNF grammar into BNF
-        self.terminals, self.rules, self.ignore_tokens = self.grammar.compile(self.options.start)
+        self.terminals, self.rules, self.ignore_tokens = self.grammar.compile(self.options.start, terminals_to_keep)
 
         if self.options.edit_terminals:
             for t in self.terminals:
@@ -311,7 +333,8 @@ class Lark(Serialize):
             with FS.open(cache_fn, 'wb') as f:
                 self.save(f)
 
-    __doc__ += "\n\n" + LarkOptions.OPTIONS_DOC
+    if __doc__:
+        __doc__ += "\n\n" + LarkOptions.OPTIONS_DOC
 
     __serialize_fields__ = 'parser', 'rules', 'options'
 
@@ -323,7 +346,13 @@ class Lark(Serialize):
         self._callbacks = None
         # we don't need these callbacks if we aren't building a tree
         if self.options.ambiguity != 'forest':
-            self._parse_tree_builder = ParseTreeBuilder(self.rules, self.options.tree_class or Tree, self.options.propagate_positions, self.options.keep_all_tokens, self.options.parser!='lalr' and self.options.ambiguity=='explicit', self.options.maybe_placeholders)
+            self._parse_tree_builder = ParseTreeBuilder(
+                    self.rules,
+                    self.options.tree_class or Tree,
+                    self.options.propagate_positions,
+                    self.options.parser!='lalr' and self.options.ambiguity=='explicit',
+                    self.options.maybe_placeholders
+                )
             self._callbacks = self._parse_tree_builder.create_callback(self.options.transformer)
 
     def _build_parser(self):
@@ -337,7 +366,7 @@ class Lark(Serialize):
         Useful for caching and multiprocessing.
         """
         data, m = self.memo_serialize([TerminalDef, Rule])
-        pickle.dump({'data': data, 'memo': m}, f)
+        pickle.dump({'data': data, 'memo': m}, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     @classmethod
     def load(cls, f):
@@ -348,7 +377,7 @@ class Lark(Serialize):
         inst = cls.__new__(cls)
         return inst._load(f)
 
-    def _load(self, f, transformer=None, postlex=None):
+    def _load(self, f, **kwargs):
         if isinstance(f, dict):
             d = f
         else:
@@ -359,12 +388,11 @@ class Lark(Serialize):
         assert memo
         memo = SerializeMemoizer.deserialize(memo, {'Rule': Rule, 'TerminalDef': TerminalDef}, {})
         options = dict(data['options'])
-        if transformer is not None:
-            options['transformer'] = transformer
-        if postlex is not None:
-            options['postlex'] = postlex
+        if (set(kwargs) - _LOAD_ALLOWED_OPTIONS) & set(LarkOptions._defaults):
+            raise ValueError("Some options are not allowed when loading a Parser: {}"
+                             .format(set(kwargs) - _LOAD_ALLOWED_OPTIONS))
+        options.update(kwargs)
         self.options = LarkOptions.deserialize(options, memo)
-        re_module = regex if self.options.regex else re
         self.rules = [Rule.deserialize(r, memo) for r in data['rules']]
         self.source = '<deserialized>'
         self._prepare_callbacks()
@@ -372,18 +400,16 @@ class Lark(Serialize):
             data['parser'],
             memo,
             self._callbacks,
-            self.options.postlex,
-            self.options.transformer,
-            re_module
+            self.options, # Not all, but multiple attributes are used
         )
         self.terminals = self.parser.lexer_conf.tokens
         self._terminals_dict = {t.name: t for t in self.terminals}
         return self
 
     @classmethod
-    def _load_from_dict(cls, data, memo, transformer=None, postlex=None):
+    def _load_from_dict(cls, data, memo, **kwargs):
         inst = cls.__new__(cls)
-        return inst._load({'data': data, 'memo': memo}, transformer, postlex)
+        return inst._load({'data': data, 'memo': memo}, **kwargs)
 
     @classmethod
     def open(cls, grammar_filename, rel_to=None, **options):

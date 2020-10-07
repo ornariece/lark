@@ -13,7 +13,6 @@ from .lalr_puppet import ParserPuppet
 
 class LALR_Parser(object):
     def __init__(self, parser_conf, debug=False):
-        assert all(r.options.priority is None for r in parser_conf.rules), "LALR doesn't yet support prioritization"
         analysis = LALR_Analyzer(parser_conf, debug=debug)
         analysis.compute_lalr()
         callbacks = parser_conf.callbacks
@@ -23,10 +22,10 @@ class LALR_Parser(object):
         self.parser = _Parser(analysis.parse_table, callbacks, debug)
 
     @classmethod
-    def deserialize(cls, data, memo, callbacks):
+    def deserialize(cls, data, memo, callbacks, debug=False):
         inst = cls.__new__(cls)
         inst._parse_table = IntParseTable.deserialize(data, memo)
-        inst.parser = _Parser(inst._parse_table, callbacks)
+        inst.parser = _Parser(inst._parse_table, callbacks, debug)
         return inst
 
     def serialize(self, memo):
