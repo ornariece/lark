@@ -9,7 +9,7 @@ from lark import Lark, UnexpectedInput
 
 from _json_parser import json_grammar   # Using the grammar from the json_parser example
 
-json_parser = Lark(json_grammar, parser='lalr')
+json_parser = Lark(json_grammar)
 
 class JsonSyntaxError(SyntaxError):
     def __str__(self):
