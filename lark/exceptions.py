@@ -39,7 +39,7 @@ class UnexpectedInput(LarkError):
             The parser doesn't hold a copy of the text it has to parse,
             so you have to provide it again
         """
-        assert self.pos_in_stream, self
+        assert self.pos_in_stream is not None, self
         pos = self.pos_in_stream
         start = max(pos - span, 0)
         end = pos + span
