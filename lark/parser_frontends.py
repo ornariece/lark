@@ -116,7 +116,7 @@ class ParsingFrontend(Serialize):
 
         # If we have a postlex, wrap the thread
         if self.postlex is not None:
-            cls = PostLexThread
+            cls = (self.options and self.options._plugins.get('PostLexThread')) or PostLexThread
             return cls(self.lexer, text, self.postlex) if text is None else cls.from_text(self.lexer, text, self.postlex)
 
         cls = (self.options and self.options._plugins.get('LexerThread')) or LexerThread
